@@ -40,21 +40,23 @@ K8S_HOST="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 vault write auth/aks/config \
 kubernetes_host="${K8S_HOST}" \
 kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
-token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+issuer="https://westeurope.oic.prod-aks.azure.com/d831639f-a912-4e54-89a1-6e82b71411e2/abfef6d8-63b7-48f3-860a-7f72837a6ab5/" \
+disable_iss_validation=false \
+disable_local_ca_jwt=true
 
 
-cat > /tmp/vsso-policy.hcl <<'EOF'
-# Read any KV v2 secret under any mount
-path "*/data/*" {
+vault audit enable file file_path=/vault/logs/audit.log
+
+vault policy write vsso-policy - <<'EOF'
+# Allow reads of KV v2 data and metadata under the sandbox-sit mount
+path "sandbox-sit/data/*" {
 capabilities = ["read"]
 }
-# Optional: read metadata (versions)
-path "*/metadata/*" {
+path "sandbox-sit/metadata/*" {
 capabilities = ["read"]
 }
 EOF
-
-vault policy write vsso-policy /tmp/vsso-policy.hcl
 
 vault write auth/aks/role/vsso \
 bound_service_account_names="*" \

@@ -1,0 +1,5 @@
+[user]
+    name = David Machacek
+    email = david.machacek@cloudhub.cz
+[includeIf "gitdir:~/work/"]
+    path = ~/.gitconfig-work

@@ -1,0 +1,14 @@
+kind: Secret
+apiVersion: v1
+metadata:
+  name: my-db-pass
+  namespace: sandbox-sit
+  annotations:
+    vault.ppfbanka.cz/path: "gaas"
+  # mount defaults to "sandbox-sit"
+  # role defaults to env VAULT_DEFAULT_ROLE
+  # service-account defaults to "default"
+  # audience defaults to "vault"
+  # refresh-seconds defaults to 300
+stringData:
+  password: "<dbpass>"

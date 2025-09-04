@@ -172,7 +172,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		"audience", audience,
 		"ttlSeconds", 300,
 	)
-	jwt, err := r.requestSAToken(ctx, req.Namespace, saName, audience, 300)
+	jwt, err := r.requestSAToken(ctx, req.Namespace, saName, audience, 660)
 	if err != nil {
 		log.Error(err, "token request failed")
 		r.eventf(&sec, corev1.EventTypeWarning, "TokenRequestFailed", "Failed to request SA token: %v", err)

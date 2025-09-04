@@ -1,8 +1,12 @@
 
 
-IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20250904.1 &&podman build --platform linux/amd64 -t $IMAGE_NAME:$IMAGE_TAG -f Containerfile && podman push $IMAGE_NAME:$IMAGE_TAG
+IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20250904.2 &&podman build --platform linux/amd64 -t $IMAGE_NAME:$IMAGE_TAG -f Containerfile && podman push $IMAGE_NAME:$IMAGE_TAG
 
 
+CGO_ENABLED=0 GOOS=linux GOARCH=linux/amd64 go build -a -o manager cmd/main.go
+
+git config --local core.sshCommand \
+'ssh -i ~/.ssh/id_rsa_cloudhub -o IdentitiesOnly=yes'
 
 
 # Postup
