@@ -123,7 +123,7 @@ spec:
       serviceAccountName: vault-secret-sync-operator
       containers:
         - name: manager
-          image: davidmachacek/vsso:20250904.3
+          image: davidmachacek/vsso:20250909.3
           imagePullPolicy: IfNotPresent
           args:
             - "--leader-elect=true"
@@ -136,12 +136,10 @@ spec:
               value: http://vault.infra-vault.svc:8200   # in-cluster DNS for the Vault Service
             - name: VAULT_K8S_MOUNT
               value: aks
-            - name: VAULT_DEFAULT_ROLE
-              value: vsso
             - name: VAULT_DEFAULT_AUDIENCE
               value: vault
             - name: DEFAULT_REFRESH_SECONDS
-              value: "300"
+              value: "60"
             # - name: VAULT_CACERT
             #   value: /etc/ssl/certs/ppfbanka-vault-ca.pem
             # - name: VAULT_NAMESPACE

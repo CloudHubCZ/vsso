@@ -20,7 +20,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
-	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // enable exec/auth providers (GCP, Azure, OIDC, ...)
 
@@ -55,17 +54,6 @@ func init() {
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return def
-}
-
-// mustParseDurationSeconds parses an integer seconds value, with default fallback.
-func mustParseDurationSeconds(s string, def time.Duration) time.Duration {
-	if s == "" {
-		return def
-	}
-	if d, err := time.ParseDuration(s + "s"); err == nil {
-		return d
 	}
 	return def
 }
@@ -137,9 +125,8 @@ func main() {
 	}
 	//vaultNamespace := os.Getenv("VAULT_NAMESPACE") // only for Vault Enterprise
 	vaultK8sMount := getenv("VAULT_K8S_MOUNT", "kubernetes")
-	defaultRole := getenv("VAULT_DEFAULT_ROLE", "vsso")
 	defaultAudience := getenv("VAULT_DEFAULT_AUDIENCE", "vault")
-	defaultRefresh := mustParseDurationSeconds(os.Getenv("DEFAULT_REFRESH_SECONDS"), 300*time.Second)
+	defaultRefreshSeconds := getenv("DEFAULT_REFRESH_SECONDS", "600")
 	caCertPath := os.Getenv("VAULT_CACERT")
 	insecureSkipVerify := os.Getenv("VAULT_SKIP_VERIFY") == "true"
 
@@ -148,9 +135,8 @@ func main() {
 		"VAULT_ADDR", vaultAddr,
 		//"VAULT_NAMESPACE", vaultNamespace,
 		"VAULT_K8S_MOUNT", vaultK8sMount,
-		"DEFAULT_ROLE", defaultRole,
-		"DEFAULT_AUDIENCE", defaultAudience,
-		"DEFAULT_REFRESH", defaultRefresh.String(),
+		"VAULT_DEFAULT_AUDIENCE", defaultAudience,
+		"DEFAULT_REFRESH_SECONDS", defaultRefreshSeconds,
 		"VAULT_CACERT", caCertPath,
 	)
 
@@ -162,10 +148,8 @@ func main() {
 	// - Starts/stops everything and handles liveness/ready probes.
 	// - Spins up each registered controller’s worker goroutines after caches have synced.
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:  scheme,
-		Metrics: metricsServerOptions,
-		// we use reconciliation loop instead of admission/mutating webhook
-		//WebhookServer:          webhookServer,
+		Scheme:                 scheme,
+		Metrics:                metricsServerOptions,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "vault-secret-sync-operator.pmb.cz",
@@ -179,18 +163,16 @@ func main() {
 	// component responsible for actual work (secret reconciliation)
 	// defined in secret_controller.go
 	reconciler := &controller.SecretReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		RestConfig: mgr.GetConfig(), // ensures TokenRequest/TokenReview client works
-		Recorder:   mgr.GetEventRecorderFor("vault-secret-sync-operator"),
-		VaultAddr:  vaultAddr,
-		//VaultNamespace:     vaultNamespace,
-		VaultK8sMount:      vaultK8sMount,
-		DefaultRole:        defaultRole,
-		DefaultAudience:    defaultAudience,
-		DefaultRefresh:     defaultRefresh,
-		CACertPath:         caCertPath,
-		InsecureSkipVerify: insecureSkipVerify,
+		Client:                mgr.GetClient(),
+		Scheme:                mgr.GetScheme(),
+		RestConfig:            mgr.GetConfig(), // ensures TokenRequest/TokenReview client works
+		Recorder:              mgr.GetEventRecorderFor("vault-secret-sync-operator"),
+		VaultAddr:             vaultAddr,
+		VaultK8sMount:         vaultK8sMount,
+		DefaultAudience:       defaultAudience,
+		DefaultRefreshSeconds: defaultRefreshSeconds,
+		CACertPath:            caCertPath,
+		InsecureSkipVerify:    insecureSkipVerify,
 	}
 
 	setupLog.Info("Registering Secret controller")

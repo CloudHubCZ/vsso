@@ -1,30 +1,41 @@
-// native Kubernetes Secrets and, based on vault.* annotations, replaces
-// placeholder values with data fetched from HashiCorp Vault (KV v2).
+// controllers/secret_controller.go
+//
+// This controller watches native Kubernetes Secrets and, based on
+// vault.* annotations, replaces placeholder values with data fetched
+// from HashiCorp Vault (KV v2). It also persists a helper annotation
+// that maps Secret keys to Vault keys for future reconciles.
 //
 // High-level flow for each Secret:
-//  1. Detect placeholders like "<dbpass>".
-//  2. Mint a short-lived projected token for the configured ServiceAccount
-//     using the TokenRequest API (audience defaults to "vault").
-//  3. Log into Vault via the Kubernetes auth method at the configured mount
-//     path (e.g. "aks") and role (e.g. "vsso").
-//  4. Read the KV v2 document at:  <mount>/data/<path>
-//  5. Patch the Secret's data and mark it with sync annotations.
-//  6. Requeue periodically (refresh) to detect upstream changes.
+//  1. Discover desired key mapping from either:
+//     - placeholders like "<dbpass>" found in secret data, or
+//     - the helper annotation: vault.ppfbanka.cz/keys (JSON map)
+//     The merged/normalized map is written back to the Secret.
+//  2. Mint a short-lived ServiceAccount token via the TokenRequest API
+//     (audience defaults to "vault").
+//  3. Log into Vault via Kubernetes auth at the configured mount (e.g. "aks")
+//     using the specified role (e.g. "vsso").
+//  4. Read KV v2 data at <mount>/data/<path> and apply values to the Secret.
+//  5. Patch the Secret and set sync annotations (last-synced, kv-version, hash).
+//  6. Requeue after the configured refresh interval to detect upstream changes.
 //
-// Security & privacy notes:
-//   - We never log secret values; logs only indicate which keys were updated.
-//   - We emit Kubernetes Events on common failure points (token, login, KV get, patch).
-//   - Reconcile returns an error on failure (no custom requeue), so controller-runtime
-//     backs off exponentially; on success we requeue after the configured refresh.
+// Security & privacy:
+//   - Secret values are never logged (only which keys changed).
+//   - Kubernetes Events are emitted for common failure points.
+//   - On errors, we return a non-nil error so controller-runtime backs off.
+//     On success, we requeue after the configured refresh duration.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
@@ -51,52 +62,26 @@ const (
 	// Example: if mount defaults to the Secret namespace, and AnnoPath="gaas",
 	// the operator will read from: <mount>/data/gaas
 	AnnoPath = "vault.ppfbanka.cz/path"
-
 	// AnnoMount allows overriding the Vault KV mount (defaults to Secret namespace).
 	AnnoMount = "vault.ppfbanka.cz/mount"
-
-	// AnnoRole overrides the Vault Kubernetes auth role (defaults to VAULT_DEFAULT_ROLE).
-	AnnoRole = "vault.ppfbanka.cz/role"
-
 	// AnnoSA overrides the ServiceAccount used for TokenRequest (defaults to "default").
 	AnnoSA = "vault.ppfbanka.cz/service-account"
-
 	// AnnoAudience overrides the TokenRequest audience (defaults to VAULT_DEFAULT_AUDIENCE).
 	AnnoAudience = "vault.ppfbanka.cz/audience"
-
 	// AnnoRefreshSecs controls the periodic success requeue interval (in seconds).
 	AnnoRefreshSecs = "vault.ppfbanka.cz/refresh-seconds"
-
 	// AnnoForceSync if set to "true" also copies Vault keys that match existing
 	// Secret keys even when they are not in placeholder form.
 	AnnoForceSync = "vault.ppfbanka.cz/force-sync"
-
 	// Read-only annotations written by the operator to aid troubleshooting.
 	AnnoLastSynced  = "vault.ppfbanka.cz/last-synced" // RFC3339 UTC timestamp
 	AnnoLastVersion = "vault.ppfbanka.cz/kv-version"  // KV version number
 	AnnoLastHash    = "vault.ppfbanka.cz/last-hash"   // hash of applied keys
+	// Value may be:
+	//   • JSON object: {"password":"dbpass","username":"dbuser"}
+	//   • CSV pairs:   password=dbpass, username=dbuser
+	AnnoKeys = "vault.ppfbanka.cz/keys"
 )
-
-// Placeholders look like "<dbpass>"; the captured token is the Vault key name.
-var placeholderRe = regexp.MustCompile(`^<([A-Za-z0-9_.-]+)>$`)
-
-// SecretReconciler reconciles core/v1 Secrets that carry our annotations.
-// Fields are injected from main.go during manager setup.
-type SecretReconciler struct {
-	client.Client
-	Scheme     *runtime.Scheme
-	RestConfig *rest.Config
-	Recorder   record.EventRecorder // emits Kubernetes Events on noteworthy actions
-	// Vault connection & auth configuration (derived from env in main.go).
-	VaultAddr string
-	//VaultNamespace     string // Vault Enterprise namespace
-	VaultK8sMount      string // e.g. "kubernetes"
-	DefaultRole        string
-	DefaultAudience    string
-	DefaultRefresh     time.Duration
-	CACertPath         string
-	InsecureSkipVerify bool
-}
 
 //Kubebuilder RBAC markers. They’re just Go comments that controller-gen parses to generate Kubernetes RBAC YAML (ClusterRoles) for operator.
 // RBAC requirements for watching/patching Secrets and for TokenRequest/TokenReview.
@@ -128,7 +113,9 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log.Info("operation=reconcileBegin")
 	defer func() { log.Info("operation=reconcileEnd, result=INSTRUMENTED", "duration", time.Since(start)) }()
 
-	// --- Fetch Secret ---
+	// ------------------------------------------------
+	// --- 1) Fetch Secret ----
+	// ------------------------------------------------
 	var sec corev1.Secret
 	if err := r.Get(ctx, req.NamespacedName, &sec); err != nil {
 		if errors.IsNotFound(err) {
@@ -143,7 +130,9 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	// --- Parse annotations into an effective config ---
+	// ------------------------------------------------
+	// --- 2) Parse annotations into config ---
+	// ------------------------------------------------
 	anns := sec.GetAnnotations()
 	if anns == nil {
 		log.V(1).Info("operation=reconcileConfig, message=no annotations present, result=SKIPPING")
@@ -159,61 +148,92 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		mount = sec.GetNamespace()
 		log.V(1).Info("operation=reconcileConfig, message=mount default fallback", "mount", mount)
 	}
-	role := anns[AnnoRole]
-	if role == "" {
-		role = r.DefaultRole
-		log.V(1).Info("operation=reconcileConfig, message=role default fallback", "role", role)
-	}
+	// Always uses role of the same name as the target namespace
+	role := sec.GetNamespace()
 	audience := anns[AnnoAudience]
 	if audience == "" {
 		audience = r.DefaultAudience
 		log.V(1).Info("operation=reconcileConfig, message=audience default fallback", "audience", audience)
 	}
-	refresh := r.DefaultRefresh
-	if v := anns[AnnoRefreshSecs]; v != "" {
-		if d, err := time.ParseDuration(v + "s"); err == nil {
-			refresh = d
-		} else {
-			log.V(1).Info("operation=reconcileConfig, message=invalid refresh-seconds annotation; using default", "value", v, "default", r.DefaultRefresh)
-		}
+	refreshInSeconds := r.DefaultRefreshSeconds
+	if annotationRefreshValue := anns[AnnoRefreshSecs]; annotationRefreshValue != "" {
+		refreshInSeconds = annotationRefreshValue
 	}
+	secs, err := strconv.ParseInt(refreshInSeconds, 10, 64)
+	if err != nil {
+		// handle parse error (fallback, log, etc.) e.g., default 10 minutes
+		secs, _ = strconv.ParseInt(r.DefaultRefreshSeconds, 10, 64)
+	}
+	refreshInSecondsDuration := time.Duration(secs) * time.Second
 	force := anns[AnnoForceSync] == "true"
-
 	saName := anns[AnnoSA]
 	if saName == "" {
 		saName = "default"
 		log.V(1).Info("operation=reconcileConfig, message=saName default fallback", "saName", saName)
 	}
-
 	log.Info("operation=reconcileConfig, message=config derived from annotations",
 		"mount", mount,
 		"path", path,
 		"role", role,
 		"audience", audience,
-		"refresh", refresh,
+		"refreshInSeconds", refreshInSeconds,
 		"forceSync", force,
 		"serviceAccount", saName,
 	)
 
-	// --- Decide which keys to pull from Vault ---
+	// ------------------------------------------------
+	// 3) Decide which keys to fetch
+	// ------------------------------------------------
+	keysToFetch := map[string]string{} // secretKey -> vaultKey
+
+	// 3a) Also support placeholders already in the Secret data: key: "<vaultKey>"
 	// Any Secret data value that looks like "<name>" is treated as a placeholder (unless force sync is used)
 	// and will be replaced by vsec.Data["name"].
-	keysToFetch := map[string]string{} // secretKey -> vaultKey
+	// Discover placeholders: secretKey -> vaultKey
+	placeholderKeys := map[string]string{}
 	for k, v := range sec.Data {
-		// placeholderRe - regex for <placeholders>
 		if m := placeholderRe.FindStringSubmatch(string(v)); m != nil {
-			keysToFetch[k] = m[1]
+			placeholderKeys[k] = m[1] // e.g., password -> dbpass
 		}
 	}
-	if len(keysToFetch) == 0 && !force {
-		log.Info("operation=reconcileSecret, message=no placeholders detected and forceSync=false; requeue after refresh", "requeueAfter", refresh)
-		return ctrl.Result{RequeueAfter: refresh}, nil
-	}
-	log.V(1).Info("operation=reconcileSecret, message=placeholders and force mode", "keysToFetch", keysToFetch, "forceSync", force, "keysCount", len(keysToFetch))
 
-	// ---
-	// --- 1) Request short-lived SA token via TokenRequest (aud=audience) ---
-	// ---
+	// 3b) From new helper annotation
+	parsedKeysAnnotation := map[string]string{}
+	if rawAnnoKeys := anns[AnnoKeys]; strings.TrimSpace(rawAnnoKeys) != "" {
+		if parsedKeys, parsingErr := parseKeysAnnotation(rawAnnoKeys); parsingErr != nil {
+			log.Error(parsingErr, "failed to parse keys annotation", "annotation", AnnoKeys, "value", rawAnnoKeys)
+			r.eventf(&sec, corev1.EventTypeWarning, "KeysAnnotationInvalid", "Invalid %s: %v", AnnoKeys, parsingErr)
+		} else {
+			parsedKeysAnnotation = parsedKeys
+		}
+	}
+
+	// Merge: annotation takes precedence for existing entries, but we add any missing
+	keysToFetch, addedByPlaceholders := mergeKeys(parsedKeysAnnotation, placeholderKeys)
+
+	// Normalize and decide if we must update the keys annotation
+	wantKeysJSON := stableKeysJSON(keysToFetch)
+	haveKeysRaw := strings.TrimSpace(anns[AnnoKeys])
+	needKeysAnnoUpdate := haveKeysRaw == "" || haveKeysRaw != wantKeysJSON
+
+	// Also track if we must ensure refresh-seconds exists
+	needRefreshAnno := anns[AnnoRefreshSecs] == ""
+	log.V(1).Info("keys annotation decision",
+		"addedByPlaceholders", addedByPlaceholders,
+		"needKeysAnnoUpdate", needKeysAnnoUpdate,
+		"needRefreshAnno", needRefreshAnno,
+		"wantKeysJSON", wantKeysJSON,
+	)
+
+	if len(keysToFetch) == 0 && !force {
+		log.Info("no keys to fetch and forceSync=false; requeue after refresh", "requeueAfter", refreshInSecondsDuration)
+		return ctrl.Result{RequeueAfter: refreshInSecondsDuration}, nil
+	}
+	log.V(1).Info("operation=reconcileSecret, message=keys to fetch (after merge of annotation + placeholders)", "keysToFetch", keysToFetch, "addedByPlaceholders", addedByPlaceholders)
+
+	// ------------------------------------------------
+	// 4) Request short-lived SA token via TokenRequest (aud=audience) ---
+	// ------------------------------------------------
 	ttl := int64(660) // 11 minutes (AKS requires >= 10m for TokenRequest)
 	log.Info("operation=reconcileTokenInit, message=requesting ServiceAccount token",
 		"namespace", req.Namespace,
@@ -229,9 +249,9 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	log.V(2).Info("operation=reconcileToken, message=ServiceAccount token acquired", "jwtLength", len(jwt))
 
-	// ---
-	// --- 2) Init Vault client and login using Kubernetes auth ---
-	// ---
+	// ------------------------------------------------
+	// 5) Init Vault client and login using Kubernetes auth ---
+	// ------------------------------------------------
 	log.Info("operation=reconcileVaultBegin, message=initializing Vault client", "addr", r.VaultAddr, "k8sAuthMount", r.VaultK8sMount)
 	vClient, err := r.newVaultClient()
 	if err != nil {
@@ -248,12 +268,14 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	log.Info("operation=reconcileVault, message=vault login succeeded!")
 
-	// ---
-	// --- 3) Read KV v2 document from Vault ---
-	// ---
+	// ------------------------------------------------
+	// 6) Read KV v2 document from Vault ---
+	// ------------------------------------------------
 	log.Info("operation=reconcileVault, message=reading KV secret from Vault", "mount", mount, "path", path)
 	kv := vClient.KVv2(mount)
-	vsec, err := kv.Get(ctx, path)
+	ctxVault, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	vsec, err := kv.Get(ctxVault, path)
 
 	if err != nil {
 		log.Error(err, "operation=reconcileVault, message=vault KV get failed", "mount", mount, "path", path)
@@ -269,9 +291,9 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.V(1).Info("operation=reconcileVault, message=vault KV metadata", "version", vsec.VersionMetadata.Version, "createdTime", vsec.VersionMetadata.CreatedTime)
 	}
 
-	// ---
-	// --- 4) Build patch with updated values and bookkeeping annotations ---
-	// ---
+	// ------------------------------------------------
+	// 7) Build patch with updated values and bookkeeping annotations ---
+	// ------------------------------------------------
 	// init array for new data for secret and inject them with actual data
 	newData := make(map[string][]byte, len(sec.Data))
 	for key, value := range sec.Data {
@@ -314,11 +336,11 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 				if err := json.Unmarshal(bs, &s); err == nil {
 					newData[secretKey] = []byte(s)
 					applied[secretKey] = digest(newData[secretKey])
-					log.V(1).Info("operation=reconcileData, message=force applied", "vault/secretKey", secretKey, "type", "string")
+					log.V(1).Info("operation=reconcileData, message=force applied", "vaultAndsecretKey", secretKey, "type", "string")
 				} else {
 					newData[secretKey] = bs
 					applied[secretKey] = digest(newData[secretKey])
-					log.V(1).Info("operation=reconcileData, message=force applied", "svault/ecretKey", secretKey, "type", "json")
+					log.V(1).Info("operation=reconcileData, message=force applied", "vaultAndsecretKey", secretKey, "type", "json")
 				}
 			} else {
 				log.V(2).Info("operation=reconcileData, message=force mode: no matching key in Vault for secret key", "secretKey", secretKey)
@@ -336,10 +358,15 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// compare old hash with new one in order to decide whether to change the secret
 	// Skip only if both “no value change” AND “no KV version change”
-	if !force && prevVer == currVer && hashEqual(oldHash, applied) {
-		return ctrl.Result{RequeueAfter: refresh}, nil
+	if !force && prevVer == currVer && hashEqual(oldHash, applied) &&
+		!needKeysAnnoUpdate && !needRefreshAnno {
+		log.Info("no data changes and no annotation updates; requeue", "requeueAfter", refreshInSecondsDuration)
+		return ctrl.Result{RequeueAfter: refreshInSecondsDuration}, nil
 	}
 
+	// ------------------------------------------------
+	// 8) Patch Secret (data + bookkeeping + ensure rotate-mins exists)
+	// ------------------------------------------------
 	log.Info("operation=reconcileHash, message=patching Secret with new data and annotations")
 	patch := client.MergeFrom(sec.DeepCopy())
 	sec.Data = newData
@@ -352,6 +379,15 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	sec.Annotations[AnnoLastHash] = newHash
 
+	if needKeysAnnoUpdate {
+		sec.Annotations[AnnoKeys] = wantKeysJSON
+	}
+
+	// ensure rotate-mins is present and normalized
+	if needRefreshAnno {
+		sec.Annotations[AnnoRefreshSecs] = refreshInSeconds
+	}
+
 	if err := r.Patch(ctx, &sec, patch); err != nil {
 		log.Error(err, "operation=reconcilePath, message=failed to patch Secret with synced data")
 		r.eventf(&sec, corev1.EventTypeWarning, "PatchFailed", "Failed to patch Secret: %v", err)
@@ -361,8 +397,8 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log.Info("operation=reconcilePath, message=secret synced from Vault", "name", req.NamespacedName, "mount", mount, "path", path, "keysUpdated", len(applied))
 	r.eventf(&sec, corev1.EventTypeNormal, "Synced", "Synced from Vault %s/%s (updated %d keys)", mount, path, len(applied))
 
-	// Success: schedule the next refresh-based reconcile.
-	return ctrl.Result{RequeueAfter: refresh}, nil
+	// Success: schedule the next refreshInSeconds-based reconcile.
+	return ctrl.Result{RequeueAfter: refreshInSecondsDuration}, nil
 }
 
 // --------------------------------
@@ -395,6 +431,29 @@ func (r *SecretReconciler) requestSAToken(ctx context.Context, namespace, sa, au
 	log.V(2).Info("operation=reconcileToken, message=CreateToken succeeded", "jwtLength", len(tok.Status.Token))
 	return tok.Status.Token, nil
 }
+
+// Placeholders look like "<dbpass>"; the captured token is the Vault key name.
+var placeholderRe = regexp.MustCompile(`^<([A-Za-z0-9_.-]+)>$`)
+
+// SecretReconciler reconciles core/v1 Secrets that carry our annotations.
+// Fields are injected from main.go during manager setup.
+type SecretReconciler struct {
+	client.Client
+	Scheme     *runtime.Scheme
+	RestConfig *rest.Config
+	Recorder   record.EventRecorder // emits Kubernetes Events on noteworthy actions
+	// Vault connection & auth configuration (derived from env in main.go).
+	VaultAddr             string
+	VaultK8sMount         string // e.g. "kubernetes"
+	DefaultAudience       string
+	DefaultRefreshSeconds string
+	CACertPath            string
+	InsecureSkipVerify    bool
+}
+
+// --------------------------------
+// vault helper function
+// --------------------------------
 
 // newVaultClient constructs a Vault client honoring address/TLS/namespace settings.
 func (r *SecretReconciler) newVaultClient() (*vaultapi.Client, error) {
@@ -472,4 +531,80 @@ func (r *SecretReconciler) eventf(obj runtime.Object, etype, reason, msgFmt stri
 func digest(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// parseKeysAnnotation parses the AnnoKeys value into secretKey -> vaultKey map.
+// Accepts JSON object or "k=v, a=b" pairs.
+func parseKeysAnnotation(s string) (map[string]string, error) {
+	out := map[string]string{}
+	str := strings.TrimSpace(s)
+	if str == "" {
+		return out, nil
+	}
+	if strings.HasPrefix(str, "{") {
+		// JSON object
+		if err := json.Unmarshal([]byte(str), &out); err != nil {
+			return nil, fmt.Errorf("invalid JSON: %w", err)
+		}
+		return out, nil
+	}
+	// CSV pairs: key=val[, key=val]...
+	parts := strings.Split(str, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var kv []string
+		if strings.Contains(p, "=") {
+			kv = strings.SplitN(p, "=", 2)
+		} else if strings.Contains(p, ":") {
+			kv = strings.SplitN(p, ":", 2)
+		} else {
+			return nil, fmt.Errorf("bad pair %q (expected key=value)", p)
+		}
+		k := strings.TrimSpace(kv[0])
+		v := strings.TrimSpace(kv[1])
+		if k == "" || v == "" {
+			return nil, fmt.Errorf("empty key or value in %q", p)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// mergeKeys unions two key maps; returns the merged map and whether anything was added.
+func mergeKeys(base, add map[string]string) (map[string]string, bool) {
+	changed := false
+	out := make(map[string]string, len(base)+len(add))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range add {
+		if _, ok := out[k]; !ok {
+			out[k] = v
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+// stableKeysJSON produces stable JSON (sorted keys) for the annotation.
+func stableKeysJSON(m map[string]string) string {
+	type kv struct{ K, V string }
+	keys := make([]kv, 0, len(m))
+	for k, v := range m {
+		keys = append(keys, kv{k, v})
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].K < keys[j].K })
+	b := &bytes.Buffer{}
+	b.WriteString("{")
+	for i, p := range keys {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(b, "%q:%q", p.K, p.V)
+	}
+	b.WriteString("}")
+	return b.String()
 }
