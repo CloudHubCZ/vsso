@@ -1,6 +1,6 @@
 
 
-IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20250909.3 &&podman build --platform linux/amd64 -t $IMAGE_NAME:$IMAGE_TAG -f Containerfile && podman push $IMAGE_NAME:$IMAGE_TAG
+IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20250909.5 && podman build --platform linux/amd64 -t $IMAGE_NAME:$IMAGE_TAG -f Containerfile && podman push $IMAGE_NAME:$IMAGE_TAG
 
 
 CGO_ENABLED=0 GOOS=linux GOARCH=linux/amd64 go build -a -o manager cmd/main.go

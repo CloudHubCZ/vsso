@@ -123,7 +123,7 @@ spec:
       serviceAccountName: vault-secret-sync-operator
       containers:
         - name: manager
-          image: davidmachacek/vsso:20250909.3
+          image: davidmachacek/vsso:20250909.5
           imagePullPolicy: IfNotPresent
           args:
             - "--leader-elect=true"

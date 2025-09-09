@@ -22,7 +22,7 @@ vault operator unseal X2qcjLE+F9hN//01Lgb1D13UFpigHQGRmMgD0Yz5Rt7G
 export VAULT_TOKEN=hvs.50DIqy9Jgnw7DxUyPQTTa2RE
 
 vault secrets enable -path=sandbox-sit -version=2 kv
-vault kv put sandbox-sit/gaas dbpass='S3cr3t-P@ss2'
+vault kv put sandbox-sit/gaas dbpass='S3cr3t-P@ss3'
 vault kv get sandbox-sit/gaas
 
 # RBAC
