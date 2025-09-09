@@ -123,14 +123,14 @@ spec:
       serviceAccountName: vault-secret-sync-operator
       containers:
         - name: manager
-          image: davidmachacek/vsso:20250909.5
+          image: davidmachacek/vsso:20250909.7
           imagePullPolicy: IfNotPresent
           args:
             - "--leader-elect=true"
+            - "--metrics-secure=false"
             - "--metrics-bind-address=:8080"
             - "--health-probe-bind-address=:8081"
-            - "--zap-log-level=debug"   # show V(1)/V(2) logs from the verbose controller
-            # - "--zap-encoder=console" # optional: easier local reading
+            - "--zap-log-level=debug"
           env:
             - name: VAULT_ADDR
               value: http://vault.infra-vault.svc:8200   # in-cluster DNS for the Vault Service

@@ -108,8 +108,8 @@ func (r *SecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	start := time.Now()
 	log := crlog.FromContext(ctx).WithValues("secret", req.NamespacedName.String())
-	log.Info("reconcile: begin")
-	defer func() { log.Info("reconcile: end", "elapsed", time.Since(start)) }()
+	log.Info("RECONCILE: BEGIN")
+	defer func() { log.Info("RECONCILE: END", "elapsed", time.Since(start)) }()
 
 	// -------------------------------
 	// 1) Fetch current Secret

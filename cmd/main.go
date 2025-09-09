@@ -66,7 +66,6 @@ func main() {
 	var (
 		metricsAddr                                      string
 		metricsCertPath, metricsCertName, metricsCertKey string
-		webhookCertPath, webhookCertName, webhookCertKey string
 		enableLeaderElection                             bool
 		probeAddr                                        string
 		secureMetrics                                    bool
@@ -79,9 +78,6 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address for health probes.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true, "Enable leader election for controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true, "Serve metrics via HTTPS (true) or HTTP (false).")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "Directory containing webhook cert/key.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "Webhook cert filename.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "Webhook key filename.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "", "Directory containing metrics server cert/key.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "Metrics server cert filename.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "Metrics server key filename.")
