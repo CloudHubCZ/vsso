@@ -1,0 +1,104 @@
+# -----------------------------------------
+# Operator SA (namespace-scoped)
+# -----------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-secret-sync-operator
+  namespace: infra-vsso
+
+---
+# -----------------------------------------
+# Leader election RBAC (namespace-scoped Role+Binding)
+# controller-runtime needs this in the operator's namespace
+# -----------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-secret-sync-operator-leader-election
+  namespace: infra-vsso
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create","patch","update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-secret-sync-operator-leader-election
+  namespace: infra-vsso
+subjects:
+  - kind: ServiceAccount
+    name: vault-secret-sync-operator
+    namespace: infra-vsso
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vault-secret-sync-operator-leader-election
+
+---
+# -----------------------------------------
+# Operator ClusterRole (cluster-scoped)
+# Watches Secrets cluster-wide, creates TokenRequests
+# -----------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vault-secret-sync-operator
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get","list","watch","update","patch"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create","patch","update"]
+
+---
+# -----------------------------------------
+# Operator ClusterRoleBinding (binds ClusterRole to operator SA)
+# (fixed: subject namespace must be infra-vsso)
+# -----------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-secret-sync-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vault-secret-sync-operator
+subjects:
+  - kind: ServiceAccount
+    name: vault-secret-sync-operator
+    namespace: infra-vsso
+
+---
+# -----------------------------------------
+# Vault TokenReview permission (REQUIRED for k8s auth)
+# Grants Vault server SA the ability to call TokenReview
+# Adjust 'name' if your SA is not 'vault'
+# -----------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: vault           # <-- change if your Vault SA has a different name
+    namespace: infra-vault
+---

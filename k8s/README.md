@@ -1,4 +1,4 @@
-
+# Test init
 helm repo add hashicorp https://helm.releases.hashicorp.com
 helm upgrade --install vault hashicorp/vault -n infra-vault --create-namespace --set injector.enabled=false
 
@@ -48,7 +48,6 @@ issuer="https://westeurope.oic.prod-aks.azure.com/d831639f-a912-4e54-89a1-6e82b7
 disable_iss_validation=false \
 disable_local_ca_jwt=true
 
-
 vault policy write sandbox-sit-policy - <<'EOF'
 # Allow reads of KV v2 data and metadata under the sandbox-sit mount
 path "sandbox-sit/data/*" {
@@ -67,7 +66,7 @@ token_policies="sandbox-sit-policy" \
 token_ttl="10m" token_max_ttl="1h"
 
 
-
+# Test generate SA
 kubectl -n sandbox-sit create token default --audience vault --duration 2m
 
 curl -s -X POST http://127.0.0.1:8001/apis/authentication.k8s.io/v1/tokenreviews \

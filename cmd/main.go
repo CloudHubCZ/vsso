@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 
+	"github.com/CloudHubCZ/vault-secret-sync-operator/controller"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // enable exec/auth providers (GCP, Azure, OIDC, ...)
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,8 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	"github.com/CloudHubCZ/vault-secret-sync-operator/internal/controller"
 )
 
 var (
@@ -119,21 +118,23 @@ func main() {
 		setupLog.Error(nil, "VAULT_ADDR is required but not set")
 		os.Exit(1)
 	}
-	//vaultNamespace := os.Getenv("VAULT_NAMESPACE") // only for Vault Enterprise
-	vaultK8sMount := getenv("VAULT_K8S_MOUNT", "kubernetes")
+	vaultK8sMount := os.Getenv("VAULT_K8S_MOUNT") // REQUIRED
+	if vaultK8sMount == "" {
+		setupLog.Error(nil, "VAULT_K8S_MOUNT is required but not set")
+		os.Exit(1)
+	}
 	defaultAudience := getenv("VAULT_DEFAULT_AUDIENCE", "vault")
-	defaultRefreshSeconds := getenv("DEFAULT_REFRESH_SECONDS", "600")
+	defaultSA := getenv("VAULT_DEFAULT_SA", "default")
 	caCertPath := os.Getenv("VAULT_CACERT")
 	insecureSkipVerify := os.Getenv("VAULT_SKIP_VERIFY") == "true"
 
 	// Log startup summary (no secrets printed)
 	setupLog.Info("Operator configuration",
 		"VAULT_ADDR", vaultAddr,
-		//"VAULT_NAMESPACE", vaultNamespace,
 		"VAULT_K8S_MOUNT", vaultK8sMount,
 		"VAULT_DEFAULT_AUDIENCE", defaultAudience,
-		"DEFAULT_REFRESH_SECONDS", defaultRefreshSeconds,
 		"VAULT_CACERT", caCertPath,
+		"VAULT_DEFAULT_SA", defaultSA,
 	)
 
 	// --- Manager ---
@@ -159,16 +160,17 @@ func main() {
 	// component responsible for actual work (secret reconciliation)
 	// defined in secret_controller.go
 	reconciler := &controller.SecretReconciler{
-		Client:                mgr.GetClient(),
-		Scheme:                mgr.GetScheme(),
-		RestConfig:            mgr.GetConfig(), // ensures TokenRequest/TokenReview client works
-		Recorder:              mgr.GetEventRecorderFor("vault-secret-sync-operator"),
-		VaultAddr:             vaultAddr,
-		VaultK8sMount:         vaultK8sMount,
-		DefaultAudience:       defaultAudience,
-		DefaultRefreshSeconds: defaultRefreshSeconds,
-		CACertPath:            caCertPath,
-		InsecureSkipVerify:    insecureSkipVerify,
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		RestConfig:           mgr.GetConfig(), // ensures TokenRequest/TokenReview client works
+		Recorder:             mgr.GetEventRecorderFor("vault-secret-sync-operator"),
+		VaultAddr:            vaultAddr,
+		VaultK8sMount:        vaultK8sMount,
+		DefaultAudience:      defaultAudience,
+		CACertPath:           caCertPath,
+		InsecureSkipVerify:   insecureSkipVerify,
+		DefaultSA:            defaultSA,
+		TestMockVaultGetFunc: nil, // FOR TESTING ONLY
 	}
 
 	setupLog.Info("Registering Secret controller")

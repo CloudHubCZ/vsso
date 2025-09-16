@@ -4,7 +4,7 @@ metadata:
   name: my-db-pass
   namespace: sandbox-sit
   annotations:
-    vault.ppfbanka.cz/path: "gaas"
+    vault.hashicorp.com/path: "gaas"
   # mount defaults to "sandbox-sit"
   # role defaults to env VAULT_DEFAULT_ROLE
   # service-account defaults to "default"
