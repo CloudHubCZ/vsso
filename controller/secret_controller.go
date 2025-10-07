@@ -115,7 +115,7 @@ func (r *SecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	startTime := time.Now()
 	log := crlog.FromContext(ctx).WithValues("secret", req.NamespacedName.String())
-	log.Info("RECONCILIATION Begin")
+	//log.Info("RECONCILIATION Begin")
 
 	// -------------------------------
 	// 1) Fetch current Secret
@@ -146,15 +146,15 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.Error(err, "invalid configuration")
 		return requeueOrNot(cfg.Refresh, nil, log, startTime)
 	}
-	log.Info("config",
-		"mount", cfg.Mount, "path", cfg.Path, "role", cfg.Role,
-		"audience", cfg.Audience, "refresh", cfg.Refresh, "sa", cfg.SA,
-	)
+	//log.Info("config",
+	//	"mount", cfg.Mount, "path", cfg.Path, "role", cfg.Role,
+	//	"audience", cfg.Audience, "refresh", cfg.Refresh, "sa", cfg.SA,
+	//)
 
 	// -------------------------------
 	// 3) Determine which keys to fetch
 	// -------------------------------
-	keysToFetch, wantKeysJSON, needKeysAnnoUpdate, needRefreshAnno, discoverErr :=
+	keysToFetch, wantKeysJSON, needKeysAnnoUpdate, _, discoverErr :=
 		discoverKeys(&secret, annotations)
 	if discoverErr != nil {
 		// Invalid JSON in AnnoKeys should be obvious to users via event + error
@@ -167,7 +167,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.Info("no keys via JSON or placeholders", "after", cfg.Refresh)
 		return requeueOrNot(cfg.Refresh, nil, log, startTime)
 	}
-	log.Info("keys to sync", "keys", keysToFetch)
+	//log.Info("keys to sync", "keys", keysToFetch)
 
 	// -------------------------------
 	// 4) Get SA token and authenticate to Vault
@@ -223,22 +223,24 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	newData, applied := buildPatchedData(&secret, vaultDocument.Data, keysToFetch)
+	oldData := secret.Data
 	newHash := hashApplied(applied)
-	oldHash := annotations[AnnoLastHash]
+	//oldHash := annotations[AnnoLastHash]
 
-	var currVer, prevVer string
-	if vaultDocument.VersionMetadata != nil {
-		currVer = fmt.Sprint(vaultDocument.VersionMetadata.Version)
-	}
-	prevVer = annotations[AnnoLastVersion]
+	//var currVer, prevVer string
+	//if vaultDocument.VersionMetadata != nil {
+	//	currVer = fmt.Sprint(vaultDocument.VersionMetadata.Version)
+	//}
+	//prevVer = annotations[AnnoLastVersion]
 
 	// -------------------------------
 	// 6) If nothing changed and no annotation normalization needed, just requeue
 	// -------------------------------
-	if prevVer == currVer && hashEqual(oldHash, applied) && !needKeysAnnoUpdate && !needRefreshAnno {
-		log.Info("no changes detected")
-		return requeueOrNot(cfg.Refresh, err, log, startTime)
-	}
+	// Always requeue - it seems ArgoCD always syncs at lest once in the beginning and keeps the hash annotation
+	//if prevVer == currVer && hashEqual(oldHash, applied) && !needKeysAnnoUpdate && !needRefreshAnno {
+	//	log.Info("no changes detected")
+	//	return requeueOrNot(cfg.Refresh, err, log, startTime)
+	//}
 
 	// -------------------------------
 	// 7) Patch Secret data + bookkeeping annotations
@@ -253,6 +255,8 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		"mount", cfg.Mount,
 		"path", cfg.Path,
 		"keysUpdated", len(applied),
+		"oldData", oldData,
+		"newData", newData,
 	)
 	r.eventf(&secret, corev1.EventTypeNormal, "Synced", "Synced from Vault %s/%s (updated %d keys)", cfg.Mount, cfg.Path, len(applied))
 
@@ -278,10 +282,15 @@ type config struct {
 
 // readConfig reads annotations and defaults to produce a usable config and the refresh duration.
 func (r *SecretReconciler) readConfig(sec *corev1.Secret, anns map[string]string) (config, error) {
+	// for infra namespaces set the roleName to just "infra-reader"
+	namespaceRole := sec.GetNamespace()
+	if strings.HasPrefix(namespaceRole, "openshift-") || strings.HasPrefix(namespaceRole, "infra-") {
+		namespaceRole = "infra-reader"
+	}
 	c := config{
 		Path:     strings.TrimSpace(anns[AnnoPath]),
 		Mount:    strings.TrimSpace(anns[AnnoMount]),
-		Role:     sec.GetNamespace(), // default: namespace = Vault role
+		Role:     namespaceRole, // default: namespace = Vault role
 		Audience: strings.TrimSpace(anns[AnnoAudience]),
 		SA:       strings.TrimSpace(anns[AnnoSA]),
 	}
@@ -498,7 +507,7 @@ func (r *SecretReconciler) eventf(obj runtime.Object, etype, reason, msgFmt stri
 // requeue immediately creating a loop)
 func requeueOrNot(refresh time.Duration, err error, log logr.Logger, start time.Time) (ctrl.Result, error) {
 	if refresh > 0 {
-		log.Info("RECONCILIATION End; requeued", "refresh", refresh, "elapsed", time.Since(start))
+		//log.Info("RECONCILIATION End; requeued", "refresh", refresh, "elapsed", time.Since(start))
 		return ctrl.Result{RequeueAfter: refresh}, err
 	}
 	log.Info("RECONCILIATION End; NOT requeued", "elapsed", time.Since(start))
