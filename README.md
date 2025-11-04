@@ -1,5 +1,5 @@
 ```
-IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20251007.2 && \
+IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20251014.2 && \
 podman build --platform linux/amd64 -t $IMAGE_NAME:$IMAGE_TAG --build-arg VERSION=$IMAGE_TAG --build-arg COMMIT="$(git rev-parse --short HEAD)" --build-arg DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -f Containerfile && \
 podman push $IMAGE_NAME:$IMAGE_TAG
 ```
@@ -12,10 +12,7 @@ Why use it:
 - Automated: periodically refreshes values and updates Secrets, emitting metadata for observability.
 
 ## How it works
-1. You create a namespaced Secret with:
-  - Annotations indicating where to read from in Vault.
-  - StringData values containing placeholders, e.g. "".
-
+1. You declare either a native Secret **or** the custom `VaultSecret` resource that points to a Vault path.
 2. The operator:
   - Authenticates to Vault using a service account token (TokenRequest) and the configured auth mount.
   - Reads the configured path in Vault (KV v1 or v2).
@@ -24,9 +21,41 @@ Why use it:
   - Requeues the object to refresh again after the configured interval.
 
 Example flow:
-- You annotate: vault.hashicorp.com/path: "app1"
-- Secret contains: StringData.password: ""
-- Operator fetches "foo" from Vault path "app1" and writes data.password = "bar" (bytes).
+- `VaultSecret` spec references `vault.path: "app1"` and `spec.stringData.password: "<foo>"`
+- Operator fetches "foo" from Vault path "app1" and writes `data.password = "bar"` in the managed Secret.
+
+## VaultSecret custom resource (cz.vsso/v1)
+You can author `VaultSecret` objects that look like native Secrets while providing Vault sourcing details in the spec. The reconciler creates and keeps a `v1/Secret` in sync for you.
+
+Example manifest:
+
+```yaml
+apiVersion: cz.vsso/v1
+kind: VaultSecret
+metadata:
+  name: my-db-pass
+  namespace: sandbox-uat
+  annotations:
+    vault.hashicorp.com/path: "app1"
+    vault.hashicorp.com/refresh-time: "120s"
+    vault.hashicorp.com/mount: sandbox-uat         # optional override, defaults to namespace
+    vault.hashicorp.com/role: sandbox-uat-reader   # optional override, defaults to namespace
+    vault.hashicorp.com/service-account: demo-sa   # optional, defaults to "default"
+    vault.hashicorp.com/audience: vault            # optional, defaults to env VAULT_DEFAULT_AUDIENCE
+  labels:
+    app: demo
+spec:
+  type: Opaque
+  stringData:
+    username: "<db_user>"
+    password: "<db_pass>"
+```
+
+Behind the scenes the operator:
+- Creates/updates a namespaced Secret with matching metadata (owner references, labels, and annotations).
+- Injects Vault values into the Secret data and keeps `status` on the `VaultSecret` up to date (`hash`, `vaultVersion`, `syncedAt`, conditions).
+- Surfaces a high-level `status.secretPhase`/`status.secretMessage` that says whether the managed Secret is ready, pending, or failed.
+- Respects the `vault.hashicorp.com/keys` annotation if you prefer an explicit `secretKey -> vaultKey` mapping over string placeholders.
 
 ## Supported annotations on Secret
 - vault.hashicorp.com/path
@@ -34,6 +63,9 @@ Example flow:
 
 - vault.hashicorp.com/refresh-time
   - Optional. Sync interval (Go duration, e.g., "120s", "10m"). Defaults if omitted.
+
+- vault.hashicorp.com/role
+  - Optional. Override the Vault role used for Kubernetes auth. Defaults to the namespace (with an infra-reader shortcut for infra namespaces).
 
 Operator-managed annotations (do not set manually):
 - vault.hashicorp.com/kv-version: "1" or "2"

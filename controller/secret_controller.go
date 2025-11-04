@@ -56,6 +56,7 @@ const (
 	// Inputs
 	AnnoPath     = "vault.hashicorp.com/path"            // required: Vault KV path (relative to mount), e.g. "app/foo"
 	AnnoMount    = "vault.hashicorp.com/mount"           // optional: KV mount name; default: namespace
+	AnnoRole     = "vault.hashicorp.com/role"            // optional: Vault role; default: namespace
 	AnnoSA       = "vault.hashicorp.com/service-account" // optional: SA name for TokenRequest; default: "default"
 	AnnoAudience = "vault.hashicorp.com/audience"        // optional: SA token audience; default: VAULT_DEFAULT_AUDIENCE
 	AnnoRefresh  = "vault.hashicorp.com/refresh-time"    // optional: reconcile interval; default: DEFAULT_REFRESH_SECONDS
@@ -67,7 +68,7 @@ const (
 	AnnoLastHash    = "vault.hashicorp.com/last-hash"
 )
 
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
@@ -97,6 +98,9 @@ type SecretReconciler struct {
 	TestMockVaultGetFunc func(ctx context.Context, mount, path string) (*vaultapi.KVSecret, error)
 }
 
+// -------------------------------
+// SETUP entrypoint
+// -------------------------------
 // Reconcile only Secrets that declare AnnoPath.
 func (r *SecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	onlyWithPath := predicate.NewPredicateFuncs(func(o client.Object) bool {
@@ -132,19 +136,27 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.Info("secret is deleting; skip")
 		return requeueOrNot(0, nil, log, startTime)
 	}
+	refresh, err := r.SyncSecret(ctx, &secret, log)
+	return requeueOrNot(refresh, err, log, startTime)
+}
+
+// -------------------------------
+// 2) Sync Secret
+// -------------------------------
+// SyncSecret executes the reconciliation logic for a Secret object that is expected to carry
+// the Vault annotations.
+func (r *SecretReconciler) SyncSecret(ctx context.Context, secret *corev1.Secret, log logr.Logger) (time.Duration, error) {
 	annotations := secret.GetAnnotations()
 	if annotations == nil {
 		log.Info("no annotations; skip")
-		return requeueOrNot(0, nil, log, startTime)
+		return 0, nil
 	}
+	log.Info("SyncSecret start", "secret", fmt.Sprintf("%s/%s", secret.Namespace, secret.Name), "annotations", annotations)
 
-	// -------------------------------
-	// 2) Build config (annotations + defaults)
-	// -------------------------------
-	cfg, err := r.readConfig(&secret, annotations)
+	cfg, err := r.readConfig(secret, annotations)
 	if err != nil {
 		log.Error(err, "invalid configuration")
-		return requeueOrNot(cfg.Refresh, nil, log, startTime)
+		return cfg.Refresh, err
 	}
 	//log.Info("config",
 	//	"mount", cfg.Mount, "path", cfg.Path, "role", cfg.Role,
@@ -155,17 +167,18 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// 3) Determine which keys to fetch
 	// -------------------------------
 	keysToFetch, wantKeysJSON, needKeysAnnoUpdate, _, discoverErr :=
-		discoverKeys(&secret, annotations)
+		discoverKeys(secret, annotations)
 	if discoverErr != nil {
 		// Invalid JSON in AnnoKeys should be obvious to users via event + error
-		r.eventf(&secret, corev1.EventTypeWarning, "BadKeysAnnotation", "Invalid JSON in %s: %v", AnnoKeys, discoverErr)
+		r.eventf(secret, corev1.EventTypeWarning, "BadKeysAnnotation", "Invalid JSON in %s: %v", AnnoKeys, discoverErr)
 		log.Error(discoverErr, "invalid JSON in AnnoKeys")
-		return requeueOrNot(cfg.Refresh, err, log, startTime)
+		return cfg.Refresh, discoverErr
 	}
+	//log.Info("discovered keys", "mapping", keysToFetch, "needKeysAnnoUpdate", needKeysAnnoUpdate)
 
 	if len(keysToFetch) == 0 {
 		log.Info("no keys via JSON or placeholders", "after", cfg.Refresh)
-		return requeueOrNot(cfg.Refresh, nil, log, startTime)
+		return cfg.Refresh, nil
 	}
 	//log.Info("keys to sync", "keys", keysToFetch)
 
@@ -175,22 +188,25 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	vaultClient, err := r.newVaultClient()
 	if err != nil {
-		r.eventf(&secret, corev1.EventTypeWarning, "VaultClientInitFailed", "Failed to init Vault client: %v", err)
-		return requeueOrNot(cfg.Refresh, nil, log, startTime)
+		r.eventf(secret, corev1.EventTypeWarning, "VaultClientInitFailed", "Failed to init Vault client: %v", err)
+		return cfg.Refresh, err
 	}
+	//log.Info("Vault client initialised", "mount", cfg.Mount)
 
 	// do not perform this during test
 	if r.TestMockVaultGetFunc == nil {
-		jwt, err := r.requestSAToken(ctx, req.Namespace, cfg.SA, cfg.Audience, 660) // 11 minutes
-
+		jwt, err := r.requestSAToken(ctx, secret.Namespace, cfg.SA, cfg.Audience, 660) // 11 minutes
 		if err != nil {
-			r.eventf(&secret, corev1.EventTypeWarning, "TokenRequestFailed", "Failed to request SA token: %v", err)
-			return requeueOrNot(cfg.Refresh, nil, log, startTime)
+			r.eventf(secret, corev1.EventTypeWarning, "TokenRequestFailed", "Failed to request SA token: %v", err)
+			log.Error(err, "Token request failed")
+			return cfg.Refresh, err
 		}
 		if err := r.vaultLoginWithK8S(ctx, vaultClient, jwt, cfg.Role); err != nil {
-			r.eventf(&secret, corev1.EventTypeWarning, "VaultLoginFailed", "Vault login failed for role %q: %v", cfg.Role, err)
-			return requeueOrNot(cfg.Refresh, nil, log, startTime)
+			r.eventf(secret, corev1.EventTypeWarning, "VaultLoginFailed", "Vault login failed for role %q: %v", cfg.Role, err)
+			log.Error(err, "Vault login failed", "role", cfg.Role)
+			return cfg.Refresh, err
 		}
+		//log.Info("Authenticated to Vault", "role", cfg.Role)
 	}
 
 	// -------------------------------
@@ -212,18 +228,20 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err != nil {
 		reason := "KV get failed"
 		err = fmt.Errorf("%s at %s/%s: %v", reason, cfg.Mount, cfg.Path, err)
-		r.eventf(&secret, corev1.EventTypeWarning, "VaultGetFailed", "%s at at %s/%s: %v", reason, cfg.Mount, cfg.Path, err)
-		return requeueOrNot(cfg.Refresh, err, log, startTime)
+		r.eventf(secret, corev1.EventTypeWarning, "VaultGetFailed", "%s at at %s/%s: %v", reason, cfg.Mount, cfg.Path, err)
+		log.Error(err, "Vault KV get failed")
+		return cfg.Refresh, err
 	}
 	if vaultDocument == nil {
 		reason := "nil response from Vault KV get"
 		err = fmt.Errorf("%s at %s/%s: %v", reason, cfg.Mount, cfg.Path, err)
-		r.eventf(&secret, corev1.EventTypeWarning, "VaultGetFailed", "%s at at %s/%s: %v", reason, cfg.Mount, cfg.Path, err)
-		return requeueOrNot(cfg.Refresh, err, log, startTime)
+		r.eventf(secret, corev1.EventTypeWarning, "VaultGetFailed", "%s at at %s/%s: %v", reason, cfg.Mount, cfg.Path, err)
+		log.Error(err, "Vault response was nil")
+		return cfg.Refresh, err
 	}
 
-	newData, applied := buildPatchedData(&secret, vaultDocument.Data, keysToFetch)
-	oldData := secret.Data
+	newData, applied := buildPatchedData(secret, vaultDocument.Data, keysToFetch)
+	//log.Info("built patched data", "keysApplied", len(applied))
 	newHash := hashApplied(applied)
 	//oldHash := annotations[AnnoLastHash]
 
@@ -245,25 +263,15 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// -------------------------------
 	// 7) Patch Secret data + bookkeeping annotations
 	// -------------------------------
-	if errPatch := r.patchSecret(ctx, &secret, newData, newHash, vaultDocument, wantKeysJSON, needKeysAnnoUpdate); errPatch != nil {
-		r.eventf(&secret, corev1.EventTypeWarning, "PatchFailed", "Failed to patch Secret: %v", errPatch)
-		return requeueOrNot(cfg.Refresh, errPatch, log, startTime)
+	if errPatch := r.patchSecret(ctx, secret, newData, newHash, vaultDocument, wantKeysJSON, needKeysAnnoUpdate); errPatch != nil {
+		r.eventf(secret, corev1.EventTypeWarning, "PatchFailed", "Failed to patch Secret: %v", errPatch)
+		log.Error(errPatch, "Failed to patch Secret")
+		return cfg.Refresh, errPatch
 	}
+	log.Info("SyncSecret end", "hash", newHash, "keysApplied", len(applied))
 
-	log.Info("secret synced from Vault",
-		"name", req.NamespacedName,
-		"mount", cfg.Mount,
-		"path", cfg.Path,
-		"keysUpdated", len(applied),
-		"oldData", oldData,
-		"newData", newData,
-	)
-	r.eventf(&secret, corev1.EventTypeNormal, "Synced", "Synced from Vault %s/%s (updated %d keys)", cfg.Mount, cfg.Path, len(applied))
-
-	// -------------------------------
-	// 8) Requeue after refresh duration
-	// -------------------------------
-	return requeueOrNot(cfg.Refresh, nil, log, startTime)
+	r.eventf(secret, corev1.EventTypeNormal, "Synced", "Synced from Vault %s/%s (updated %d keys)", cfg.Mount, cfg.Path, len(applied))
+	return cfg.Refresh, nil
 }
 
 // -------------------------------
@@ -293,6 +301,9 @@ func (r *SecretReconciler) readConfig(sec *corev1.Secret, anns map[string]string
 		Role:     namespaceRole, // default: namespace = Vault role
 		Audience: strings.TrimSpace(anns[AnnoAudience]),
 		SA:       strings.TrimSpace(anns[AnnoSA]),
+	}
+	if customRole := strings.TrimSpace(anns[AnnoRole]); customRole != "" {
+		c.Role = customRole
 	}
 	if c.Path == "" {
 		return c, fmt.Errorf("missing required annotation %q", AnnoPath)
@@ -507,10 +518,10 @@ func (r *SecretReconciler) eventf(obj runtime.Object, etype, reason, msgFmt stri
 // requeue immediately creating a loop)
 func requeueOrNot(refresh time.Duration, err error, log logr.Logger, start time.Time) (ctrl.Result, error) {
 	if refresh > 0 {
-		//log.Info("RECONCILIATION End; requeued", "refresh", refresh, "elapsed", time.Since(start))
+		//log.Info("RECONCILIATION End; requeued", "refresh", refresh, "elapsed", time.Since(start), "error", err)
 		return ctrl.Result{RequeueAfter: refresh}, err
 	}
-	log.Info("RECONCILIATION End; NOT requeued", "elapsed", time.Since(start))
+	//log.Info("RECONCILIATION End; NOT requeued", "elapsed", time.Since(start), "error", err)
 	return ctrl.Result{}, err
 }
 

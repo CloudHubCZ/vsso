@@ -154,13 +154,13 @@ func TestSecretReconcile_NOK_MissingPath_NoOp(t *testing.T) {
 // -------------------------------------------
 // ----------------- helpers -----------------
 // -------------------------------------------
-func initTestedController(t *testing.T, secret *corev1.Secret) (SecretReconciler, client.WithWatch) {
+func initTestedController(t *testing.T, secret *corev1.Secret) (*SecretReconciler, client.WithWatch) {
 
 	scheme := runtime.NewScheme()
 	mustNoErr(t, clientgoscheme.AddToScheme(scheme))
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	return SecretReconciler{
+	return &SecretReconciler{
 		Client:             cl,
 		Scheme:             scheme,
 		VaultAddr:          "https://vault.example",

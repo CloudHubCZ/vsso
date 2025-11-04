@@ -1,14 +1,16 @@
-kind: Secret
-apiVersion: v1
+apiVersion: cz.vsso/v1
+kind: VaultSecret
 metadata:
   name: my-db-pass
   namespace: sandbox-sit
   annotations:
-    vault.hashicorp.com/path: "gaas"
-  # mount defaults to "sandbox-sit"
-  # role defaults to env VAULT_DEFAULT_ROLE
-  # service-account defaults to "default"
-  # audience defaults to "vault"
-  # refresh-seconds defaults to 300
-stringData:
-  password: "<dbpass>"
+    vault.hashicorp.com/path: dbos-sit
+    vault.hashicorp.com/service-account: default
+    vault.hashicorp.com/refresh-time: 2m
+  labels:
+    app: example
+spec:
+  type: Opaque
+  stringData:
+    username: "<db_user>"
+    password: "<db_pass>"

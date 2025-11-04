@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 
+	vssov1 "github.com/CloudHubCZ/vault-secret-sync-operator/api/v1"
 	"github.com/CloudHubCZ/vault-secret-sync-operator/controller"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // enable exec/auth providers (GCP, Azure, OIDC, ...)
 
@@ -43,6 +44,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(vssov1.AddToScheme(scheme))
 }
 
 // --------------------------------
@@ -176,6 +178,12 @@ func main() {
 	setupLog.Info("Registering Secret controller")
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Secret")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Registering VaultSecret controller")
+	if err := (&controller.VaultSecretReconciler{SecretReconciler: reconciler}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VaultSecret")
 		os.Exit(1)
 	}
 
