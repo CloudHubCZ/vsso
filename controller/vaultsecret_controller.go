@@ -256,6 +256,13 @@ func (r *VaultSecretReconciler) updateStatus(ctx context.Context, vs *vssov1.Vau
 	vs.Status.SecretName = secret.Name
 	vs.Status.Hash = secret.Annotations[AnnoLastHash]
 	vs.Status.VaultVersion = secret.Annotations[AnnoLastVersion]
+	if path := vs.Annotations[AnnoPath]; path != "" {
+		vs.Status.VaultPath = path
+	} else if secret != nil {
+		vs.Status.VaultPath = secret.Annotations[AnnoPath]
+	} else {
+		vs.Status.VaultPath = ""
+	}
 
 	// Convert the RFC3339 timestamp written by the Secret reconciler.
 	if stamp := secret.Annotations[AnnoLastSynced]; stamp != "" {

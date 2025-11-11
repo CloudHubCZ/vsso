@@ -62,6 +62,10 @@ type VaultSecretStatus struct {
 	// +optional
 	VaultVersion string `json:"vaultVersion,omitempty"`
 
+	// VaultPath mirrors the path annotation so kubectl/oc printers can display it reliably.
+	// +optional
+	VaultPath string `json:"vaultPath,omitempty"`
+
 	// SecretName records the name of the managed core Secret.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
@@ -88,7 +92,7 @@ type VaultSecretStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=vaultsecrets,scope=Namespaced,shortName=vs
 // +kubebuilder:printcolumn:name="Secret",type=string,JSONPath=`.status.secretName`
-// +kubebuilder:printcolumn:name="Path",type=string,JSONPath=`.metadata.annotations['vault.hashicorp.com/path']`
+// +kubebuilder:printcolumn:name="Path",type=string,JSONPath=`.status.vaultPath`
 // +kubebuilder:printcolumn:name="Synced",type=string,JSONPath=`.status.syncedAt`
 
 // VaultSecret is the Schema for the VaultSecret API.

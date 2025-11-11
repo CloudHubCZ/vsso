@@ -1,5 +1,5 @@
 ```
-IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20251111.1 && \
+IMAGE_NAME=davidmachacek/vsso && IMAGE_TAG=20251111.2 && \
 podman build --platform linux/amd64 -t $IMAGE_NAME:$IMAGE_TAG --build-arg VERSION=$IMAGE_TAG --build-arg COMMIT="$(git rev-parse --short HEAD)" --build-arg DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -f Containerfile && \
 podman push $IMAGE_NAME:$IMAGE_TAG
 ```
