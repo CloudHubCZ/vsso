@@ -1,4 +1,4 @@
-apiVersion: cz.vsso/v1
+apiVersion: vsso.cz/v1
 kind: VaultSecret
 metadata:
   name: my-db-pass

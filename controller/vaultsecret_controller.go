@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	vaultSecretFinalizer = "vaultsecret.cz.vsso/finalizer"
+	vaultSecretFinalizer = "vaultsecret.vsso.cz/finalizer"
 
 	conditionTypeReady    = "Ready"
 	conditionReasonSynced = "Synced"
@@ -30,9 +30,9 @@ const (
 // VaultSecretReconciler manages VaultSecret custom resources and ensures a core Secret exists with data sourced from Vault.
 // Each VaultSecret owns a backing Secret of the same name/namespace; this controller mirrors metadata and reuses the
 // Secret reconciler to inject Vault data based on annotations and placeholders.
-// +kubebuilder:rbac:groups=cz.vsso,resources=vaultsecrets,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=cz.vsso,resources=vaultsecrets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=cz.vsso,resources=vaultsecrets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=vsso.cz,resources=vaultsecrets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=vsso.cz,resources=vaultsecrets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=vsso.cz,resources=vaultsecrets/finalizers,verbs=update
 type VaultSecretReconciler struct {
 	*SecretReconciler
 }

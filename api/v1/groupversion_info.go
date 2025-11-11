@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1 contains API Schema definitions for the cz.vsso v1 API group.
+// Package v1 contains API Schema definitions for the vsso.cz v1 API group.
 // +kubebuilder:object:generate=true
-// +groupName=cz.vsso
+// +groupName=vsso.cz
 package v1
 
 import (
@@ -26,7 +26,7 @@ import (
 
 var (
 	// GroupVersion is the group version used to register these objects.
-	GroupVersion = schema.GroupVersion{Group: "cz.vsso", Version: "v1"}
+	GroupVersion = schema.GroupVersion{Group: "vsso.cz", Version: "v1"}
 
 	// SchemeBuilder collects functions that add things to a scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}

@@ -17,7 +17,7 @@ resources:
   version: v1
 - controller: true
   core: false
-  group: cz.vsso
+  group: vsso.cz
   kind: VaultSecret
   path: github.com/CloudHubCZ/vault-secret-sync-operator/api/v1
   version: v1
